@@ -26,7 +26,7 @@ Before running the application, you need to configure the app by providing the n
 
 1. **Entity Name**: Enter the name of the D365 entity from which you want to delete records.
 
-2. **Batch Size**: Specify the number of records to process in each batch. If you don't provide a valid value, the default batch size is 100.
+2. **Batch Size**: Specify the number of records to process in each batch. If you don't provide a valid value, the default batch size is 100. The larger the batch file the fewer calls to D365 are made, however as D365 have as maximum execution time of 2 minutes per call it is recommended to leave this value below 1000.
 
 3. **Client Configuration**: Define the client configuration details in the app.config file. You can specify multiple clients with their respective ClientId and ClientSecret for parallel processing. This needs to be in KVP JSON format (e.g. [{"clientid";:"<ClientID1>,"clientsecret":"<ClientSecret1>"},{"clientid";:"<ClientID2>,"clientsecret":"<ClientSecret2>"},....]) 
 
@@ -34,7 +34,7 @@ Before running the application, you need to configure the app by providing the n
 
 5. **Processing Retries**: Configure the number of processing retries in the app.config file. This allows you to retry the deletion process if it fails or times out.
 
-6. **Thread Count**: Adjust the number of threads for parallel processing in the app.config file.
+6. **Thread Count**: Adjust the number of threads for parallel processing in the app.config file. This value applies per application user. As dataverse has a throttling limit for a maximum of 52 conurrent connection it is recommended to leave this around 25 to avoid 429 errors.
 
 ## Usage
 
