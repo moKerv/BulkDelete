@@ -66,10 +66,13 @@ This project is provided under an open-source license. You can find the license 
 
 For questions, bug reports, or feature requests, please create an issue in the project's GitHub repository.
 
+## Known Issues
+
+1. The application occassionally leaves some records unprocessed, this is likely an issue due to some batches failing. It is observed the conn for some batches fail to start with 401 error but after a few retries it sometimes work. Current workaround: the whole process repeats run after it completes; this is controled by a config setting indicating how many times it should re-run.
+2. The application sometimes get stuck after processing all records and keep reporting more records to be deleted than there are; this is likely due to handling of batch creation and dequeing messages to process.
+3. When issue 2 happen the application doesn't proceed to retry leaving records still in entity table.
+ 
 ## Disclaimer
 
 This application is intended for use in non-production environments for testing and development purposes. Always exercise caution when working with production data in a D365 environment.
 
----
-
-Feel free to customize this README to provide additional details, such as contact information or specific usage instructions for your team.
