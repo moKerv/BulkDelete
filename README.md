@@ -4,7 +4,7 @@
 
 The D365 Record Deletion Console App is a C# application designed to help you delete records from a Dataverse environment. This app provides a flexible and efficient way to delete large quantities of records while allowing for configuration of batch size and retry options.
 The application retrieves all records to be deleted from Dataverse then splits the records across multiple application accounts defined in the config.
-The application also creates multiple threads per each application account to maximise the throuput 
+The application also creates multiple threads per each application account to maximise the throughput 
 
 ## Requirements
 
