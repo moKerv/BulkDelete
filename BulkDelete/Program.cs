@@ -1,30 +1,29 @@
 ﻿using Microsoft.Xrm.Sdk;
 using Microsoft.Xrm.Sdk.Messages;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
-using System.Configuration;
-using System.Data.SqlTypes;
 using Microsoft.Xrm.Sdk.Query;
-using Newtonsoft.Json;
-using System.Threading;
-using Microsoft.Crm.Sdk.Messages;
-using System.IO;
 using Microsoft.PowerPlatform.Dataverse.Client;
+using Newtonsoft.Json;
+using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Configuration;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 class Program
 {
-    private static int _recorddeletedcount = 0;
+    private static int _recordDeletedCount = 0;
     private static int _totalRecords = 0;
     private static DateTime _startTime;
-    private static int _batchruns  = 0;
-    private static int _processingRetry,_allretries = 0;
+    private static int _batchRuns = 0;
+    private static int _processingRetry, _allRetries = 0;
     private static Dictionary<string, int> _reportDictionary = new Dictionary<string, int>();
-    static Dictionary<string, ServiceClient> connections = new Dictionary<string, ServiceClient>();
+    private static ConcurrentDictionary<string, ServiceClient> connections = new ConcurrentDictionary<string, ServiceClient>();
     private static readonly object fileLock = new object();
-    private static int _batchesstarted, _batchesended, _batchesfailed = 0;
+    private static int _batchesStarted, _batchesEnded, _batchesFailed = 0;
+
     static async Task Main(string[] args)
     {
         Console.Write("Enter the entity name: ");
@@ -37,51 +36,57 @@ class Program
             batchSize = 100;
         }
 
-        // Fetch client IDs and secrets from the configuration in the specified format
         var clientConfig = ConfigurationManager.AppSettings.Get("ClientConfig");
         var clientPairs = JsonConvert.DeserializeObject<List<ClientConfig>>(clientConfig);
 
-        // Fetch the D365 URL from the configuration
         string d365Url = ConfigurationManager.AppSettings.Get("D365URL");
-        int ThreadCount = Convert.ToInt32(ConfigurationManager.AppSettings.Get("ThreadCount")); 
-        _allretries = Convert.ToInt32(ConfigurationManager.AppSettings.Get("ProcessingRetries"));
+        int threadCount = int.Parse(ConfigurationManager.AppSettings.Get("ThreadCount"));
+        _allRetries = int.Parse(ConfigurationManager.AppSettings.Get("ProcessingRetries"));
         _processingRetry = 1;
-          
-        while (_processingRetry <= _allretries)
+
+        while (_processingRetry <= _allRetries)
         {
             Console.WriteLine("Getting All Records");
 
-            var recordIds = FetchAllRecordIds(entityName, clientPairs.First(), d365Url); // Example using the first client
+            var recordIds = FetchAllRecordIds(entityName, clientPairs.First(), d365Url);
             _totalRecords = recordIds.Count;
             _startTime = DateTime.Now;
 
-            await ProcessBatchesAsync(batchSize, clientPairs, d365Url, ThreadCount, recordIds);
+            await ProcessBatchesAsync(entityName, batchSize, clientPairs, d365Url, threadCount, recordIds);
             _processingRetry++;
         }
-        // Await user input before exiting
+
         Console.WriteLine("Press Enter to exit.");
         Console.ReadLine();
     }
 
-    private static async Task ProcessBatchesAsync(int batchSize, List<ClientConfig> clientPairs, string d365Url, int threadCount, List<Guid> RecordIDs)
+    private static async Task ProcessBatchesAsync(string entityName, int batchSize, List<ClientConfig> clientPairs, string d365Url, int threadCount, List<Guid> recordIds)
     {
-        var sublists = SplitList(RecordIDs, clientPairs.Count);
-
+        var sublists = SplitList(recordIds, clientPairs.Count);
         var tasks = new List<Task>();
+
+        var semaphore = new SemaphoreSlim(threadCount);
 
         for (int i = 0; i < clientPairs.Count; i++)
         {
             var sublist = sublists[i];
             var clientPair = clientPairs[i];
-            var semaphore = new SemaphoreSlim(threadCount);
-
-            var recordBatches = SplitIntoBatches(sublist, threadCount);
+            var recordBatches = SplitIntoBatches(sublist, batchSize);
 
             foreach (var batch in recordBatches)
             {
                 await semaphore.WaitAsync();
-                tasks.Add(ProcessBatchAsync("entityName", batch, clientPair, d365Url)
-                    .ContinueWith(_ => semaphore.Release()));
+                tasks.Add(Task.Run(async () =>
+                {
+                    try
+                    {
+                        await ProcessBatchAsync(entityName, batch, clientPair, d365Url);
+                    }
+                    finally
+                    {
+                        semaphore.Release();
+                    }
+                }));
             }
         }
 
@@ -117,8 +122,7 @@ class Program
         return batches;
     }
 
-
-    static List<Guid> FetchAllRecordIds(string entityName, ClientConfig client, string d365Url)
+    private static List<Guid> FetchAllRecordIds(string entityName, ClientConfig client, string d365Url)
     {
         var connStr = $"AuthType=ClientSecret;url={d365Url};ClientId={client.ClientId};ClientSecret={client.ClientSecret}";
         using (var conn = new ServiceClient(connStr))
@@ -126,6 +130,7 @@ class Program
             if (!conn.IsReady)
             {
                 Console.WriteLine(conn.LastError);
+                return new List<Guid>();
             }
 
             var allRecordIds = new List<Guid>();
@@ -146,13 +151,9 @@ class Program
 
                 var result = conn.RetrieveMultiple(query);
 
-                foreach (var entity in result.Entities)
-                {
-                    var recordId = entity.Id;
-                    allRecordIds.Add(recordId);
-                }
-                Console.Write("\r Fetched: {0} records               ", allRecordIds.Count);
-                _reportDictionary["ReportingLine"] = Console.CursorTop;
+                allRecordIds.AddRange(result.Entities.Select(e => e.Id));
+                Console.Write($"\rFetched: {allRecordIds.Count} records               ");
+                _reportDictionary["ReportingLine"] = Console.CursorTop+5;
                 if (result.MoreRecords)
                 {
                     pagingCookie = result.PagingCookie;
@@ -160,7 +161,7 @@ class Program
                 }
                 else
                 {
-                    Console.WriteLine(" ");
+                    Console.WriteLine();
                     break;
                 }
             }
@@ -169,174 +170,131 @@ class Program
         }
     }
 
-    static async Task ProcessBatchAsync(
-    string entityName, List<Guid> batchRecordIds, ClientConfig clientPair, string d365Url)
+    private static async Task ProcessBatchAsync(string entityName, List<Guid> batchRecordIds, ClientConfig clientPair, string d365Url)
     {
-        _batchesstarted++;
-       
-        Console.SetCursorPosition(0, _reportDictionary["ReportingLine"] + 12);
+        Interlocked.Increment(ref _batchesStarted);
 
-        Console.Write($"batches started:{_batchesstarted}, Batches completed: {_batchesended}, Batches failed: {_batchesfailed}");
-        ServiceClient conn;
-
-        lock (connections)
+        ServiceClient conn = connections.GetOrAdd(clientPair.ClientId, clientId =>
         {
-            if (!connections.TryGetValue(clientPair.ClientId, out conn))
-            {
-                // Initialize a new connection for this ClientId
-                var connStr = $"AuthType=ClientSecret;url={d365Url};ClientId={clientPair.ClientId};ClientSecret={clientPair.ClientSecret}";
-                conn = new ServiceClient(connStr);
-                connections[clientPair.ClientId] = conn;
-            }
-            if (conn == null || !conn.IsReady)
-            {
-                // Initialize a new connection for this ClientId
-                var connStr = $"AuthType=ClientSecret;url={d365Url};ClientId={clientPair.ClientId};ClientSecret={clientPair.ClientSecret}";
-                conn = new ServiceClient(connStr);
-                connections[clientPair.ClientId] = conn;
-            }
+            var connStr = $"AuthType=ClientSecret;url={d365Url};ClientId={clientPair.ClientId};ClientSecret={clientPair.ClientSecret}";
+            return new ServiceClient(connStr);
+        });
+
+        if (!conn.IsReady)
+        {
+            Interlocked.Increment(ref _batchesFailed);
+            LogError("Batch Creation Error", conn.LastError);
+            return;
         }
 
         try
         {
-            if (conn != null && conn.IsReady)
+            var requests = new OrganizationRequestCollection();
+            foreach (var recordId in batchRecordIds)
             {
-                // Wrap the asynchronous code in a Task.Run to maintain the async nature
-                await Task.Run(async () =>
+                var deleteRequest = new DeleteRequest
                 {
-                    var requests = new List<OrganizationRequest>();
-
-                    foreach (var recordId in batchRecordIds)
-                    {
-                        var deleteRequest = new DeleteRequest
-                        {
-                            Target = new EntityReference(entityName, recordId)
-                        };
-                        deleteRequest.Parameters.Add("BypassCustomPluginExecution", true);
-                        requests.Add(deleteRequest);
-                    }
-
-                    var multipleRequest = new ExecuteMultipleRequest
-                    {
-                        Requests = new OrganizationRequestCollection(),
-                        Settings = new ExecuteMultipleSettings
-                        {
-                            ContinueOnError = true,
-                            ReturnResponses = true
-                        }
-                    };
-
-                    multipleRequest.Requests.AddRange(requests);
-
-                    var multipleResponse = (ExecuteMultipleResponse)await conn.ExecuteAsync(multipleRequest); // Use await here
-
-
-                    _recorddeletedcount += batchRecordIds.Count;
-                    double percentComplete = (double)_recorddeletedcount / _totalRecords * 100;
-                    _batchruns++;
-                    TimeSpan elapsedTime = DateTime.Now.Subtract(_startTime);
-                    double timePerPercent = elapsedTime.TotalMilliseconds / percentComplete;
-                    double remainingPercent = 100 - percentComplete;
-
-                    string formattedTime = $"{elapsedTime.Hours:D2}:{elapsedTime.Minutes:D2}:{elapsedTime.Seconds:D2}";
-
-
-                    int cursorPosition = _reportDictionary["ReportingLine"];
-                    Console.SetCursorPosition(0, cursorPosition);
-
-                    if (percentComplete > 0.001)
-                    {
-                        TimeSpan estimatedTimeRemaining = TimeSpan.FromMilliseconds(timePerPercent * remainingPercent);
-                        DateTime estimatedCompletionTime = DateTime.Now.Add(estimatedTimeRemaining);
-                        int processingRate = Convert.ToInt32((_recorddeletedcount / elapsedTime.TotalSeconds));
-                        Console.WriteLine(
-                            $"      ------------------ RUN Number: {_processingRetry}/{_allretries}".PadRight(79, '-'));
-                        cursorPosition++;
-                        Console.SetCursorPosition(0, cursorPosition);
-                        Console.WriteLine($"    | Number of Records Processed: {_recorddeletedcount} of {_totalRecords}"
-                            .PadRight(80) + '|');
-                        cursorPosition++;
-                        Console.SetCursorPosition(0, cursorPosition);
-                        Console.WriteLine($"    | Percentage Complete          {percentComplete:F2}%".PadRight(80) + '|');
-                        cursorPosition++;
-                        Console.SetCursorPosition(0, cursorPosition);
-                        Console.WriteLine($"    | Remaining Records:           {_totalRecords - _recorddeletedcount}"
-                            .PadRight(80) + '|');
-                        cursorPosition++;
-                        Console.SetCursorPosition(0, cursorPosition);
-                        Console.WriteLine($"    | Elapsed Time:                {elapsedTime}".PadRight(80) + '|');
-                        cursorPosition++;
-                        Console.SetCursorPosition(0, cursorPosition);
-                        Console.WriteLine($"    | Remaining Time:              {estimatedTimeRemaining}".PadRight(80) +
-                                          '|');
-                        cursorPosition++;
-                        Console.SetCursorPosition(0, cursorPosition);
-                        Console.WriteLine(
-                            $"    | Transfer rate:               {processingRate} records per second".PadRight(80) + '|');
-                        cursorPosition++;
-                        Console.SetCursorPosition(0, cursorPosition);
-                        Console.WriteLine(
-                            $"    | Estimated Completion time:   {estimatedCompletionTime}".PadRight(80) + '|');
-
-                        //cursorPosition++;
-                        //Console.SetCursorPosition(0, cursorPosition);
-                        //Console.WriteLine("      ----------------------------".PadRight(79, '-'));
-
-                        //cursorPosition++;
-                        //Console.SetCursorPosition(0, cursorPosition);
-                        //Console.WriteLine(
-                        //    $"    | Batches Started:   {_batchesstarted}".PadRight(80) + '|'); cursorPosition++;
-                        //cursorPosition++;
-                        //Console.SetCursorPosition(0, cursorPosition);
-                        //Console.WriteLine(
-                        //    $"    | Batches complete/failed:   {_batchesended}/{_batchesended}".PadRight(80) + '|'); cursorPosition++;
-                        //cursorPosition++;
-                        //Console.SetCursorPosition(0, cursorPosition);
-                        //Console.WriteLine(
-                        //    $"    | Progressing Batches:   {Math_batchesstarted-_batchesended-_batchesfailed}".PadRight(80) + '|'); cursorPosition++;
-
-
-
-                        cursorPosition++;
-                        Console.SetCursorPosition(0, cursorPosition);
-                        Console.WriteLine("      ----------------------------".PadRight(79, '-'));
-                    }
-
-                    //go to reporting line
-
-                    //   Console.Write("\r-Processed {0} records. Estimated completion time: {1}. Total time spent {2} ({3} RPS)", 
-                    //    _recorddeletedcount, estimatedCompletionTime, formattedTime, processingRate)
-                    _batchesended++;
-                }).ConfigureAwait(false); // ConfigureAwait to prevent deadlocks
-                
+                    Target = new EntityReference(entityName, recordId)
+                };
+                deleteRequest.Parameters.Add("BypassCustomPluginExecution", true);
+                requests.Add(deleteRequest);
             }
-            else
+
+            var multipleRequest = new ExecuteMultipleRequest
             {
-                _batchesfailed++;
-                LogError("Batch Creation Error", conn != null ? conn.LastError : "Connection not ready");
+                Requests = requests,
+                Settings = new ExecuteMultipleSettings
+                {
+                    ContinueOnError = true,
+                    ReturnResponses = true
+                }
+            };
+
+            var multipleResponse = (ExecuteMultipleResponse)await conn.ExecuteAsync(multipleRequest);
+
+            foreach (var response in multipleResponse.Responses)
+            {
+                if (response.Fault != null)
+                {
+                    LogError("Delete Fault", $"Record ID: {batchRecordIds[response.RequestIndex]}, Error: {response.Fault.Message}");
+                }
+                else
+                {
+                    Interlocked.Increment(ref _recordDeletedCount);
+                }
             }
+
+            double percentComplete = (double)_recordDeletedCount / _totalRecords * 100;
+            Interlocked.Increment(ref _batchRuns);
+            TimeSpan elapsedTime = DateTime.Now.Subtract(_startTime);
+            double timePerPercent = elapsedTime.TotalMilliseconds / percentComplete;
+            double remainingPercent = 100 - percentComplete;
+
+            string formattedTime = $"{elapsedTime.Hours:D2}:{elapsedTime.Minutes:D2}:{elapsedTime.Seconds:D2}";
+
+            int cursorPosition = _reportDictionary["ReportingLine"];
+            lock (fileLock)
+            {
+                Console.SetCursorPosition(0, cursorPosition);
+
+                if (percentComplete > 0.001)
+                {
+                    TimeSpan estimatedTimeRemaining = TimeSpan.FromMilliseconds(timePerPercent * remainingPercent);
+                    DateTime estimatedCompletionTime = DateTime.Now.Add(estimatedTimeRemaining);
+                    int processingRate = (int)(_recordDeletedCount / elapsedTime.TotalSeconds);
+                    Console.WriteLine($"      ------------------ RUN Number: {_processingRetry}/{_allRetries}".PadRight(79, '-'));
+                    cursorPosition++;
+                    Console.SetCursorPosition(0, cursorPosition);
+                    Console.WriteLine($"    | Number of Records Processed: {_recordDeletedCount} of {_totalRecords}".PadRight(80) + '|');
+                    cursorPosition++;
+                    Console.SetCursorPosition(0, cursorPosition);
+                    Console.WriteLine($"    | Percentage Complete          {percentComplete:F2}%".PadRight(80) + '|');
+                    cursorPosition++;
+                    Console.SetCursorPosition(0, cursorPosition);
+                    Console.WriteLine($"    | Remaining Records:           {_totalRecords - _recordDeletedCount}".PadRight(80) + '|');
+                    cursorPosition++;
+                    Console.SetCursorPosition(0, cursorPosition);
+                    Console.WriteLine($"    | Elapsed Time:                {formattedTime}".PadRight(80) + '|');
+                    cursorPosition++;
+                    Console.SetCursorPosition(0, cursorPosition);
+                    Console.WriteLine($"    | Remaining Time:              {estimatedTimeRemaining}".PadRight(80) + '|');
+                    cursorPosition++;
+                    Console.SetCursorPosition(0, cursorPosition);
+                    Console.WriteLine($"    | Transfer rate:               {processingRate} records per second".PadRight(80) + '|');
+                    cursorPosition++;
+                    Console.SetCursorPosition(0, cursorPosition);
+                    Console.WriteLine($"    | Estimated Completion time:   {estimatedCompletionTime}".PadRight(80) + '|');
+                    cursorPosition++;
+                    Console.SetCursorPosition(0, cursorPosition);
+                    Console.WriteLine("      ----------------------------".PadRight(79, '-'));
+                }
+
+                Console.SetCursorPosition(0, cursorPosition + 12);
+                Console.Write($"batches started: {_batchesStarted}, Batches completed: {_batchesEnded}, Batches failed: {_batchesFailed}");
+            }
+
+            Interlocked.Increment(ref _batchesEnded);
         }
         catch (Exception ex)
         {
-            _batchesfailed++;
-            LogError("Conn Error: ", ex.Message);
+            Interlocked.Increment(ref _batchesFailed);
+            LogError("Process Batch Error", ex.Message);
         }
-        
     }
 
-
-    class ClientConfig
+    private class ClientConfig
     {
         public string ClientId { get; set; }
         public string ClientSecret { get; set; }
     }
-    static void LogError(string category, string message)
+
+    private static void LogError(string category, string message)
     {
         lock (fileLock)
         {
             using (StreamWriter writer = File.AppendText("error.log"))
             {
-                writer.WriteLine($"{category}: {message}");
+                writer.WriteLine($"{DateTime.Now} - {category}: {message}");
             }
         }
     }
