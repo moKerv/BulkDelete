@@ -152,6 +152,7 @@ class Program
                     allRecordIds.Add(recordId);
                 }
                 Console.Write("\r Fetched: {0} records               ", allRecordIds.Count);
+                _reportDictionary["ReportingLine"] = Console.CursorTop;
                 if (result.MoreRecords)
                 {
                     pagingCookie = result.PagingCookie;
