@@ -363,3 +363,4 @@ MigrationBackup/
 FodyWeavers.xsd
 /BulkDelete/App.config
 /BulkDelete/Program - Copy.cs
+/BulkDelete/App.config
